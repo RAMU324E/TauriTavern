@@ -4,24 +4,26 @@
 
 This branch is intended to contain only MiMo TTS and xAI Grok TTS work.
 
-Anything unrelated to those providers was explicitly reverted before handoff.
+Anything unrelated to those providers was explicitly reverted before handoff, except for one startup-safety fix and one isolated-launch config that were re-added later because the user could not boot the app reliably.
 
 Current branch:
 
 - `codex/add-mimo-grok-tts`
-- local HEAD: `5a82b1d39f86d07ab821e0b7224fe47087266f48`
+- branch cleaned/pushed commit: `50fc7ec`
 - upstream main at handoff: `e1b67af0bf603fdd56ca3da536fb0e775cefc6ef`
 
 ## Files Changed Vs Upstream
 
-These are the intended branch-level changes compared to `upstream/main`:
+These are the intended branch-level changes compared to `upstream/main`, plus the minimal startup fixes re-added later:
 
+- `src/scripts/openai.js`
 - `src/scripts/extensions/tts/grok.js`
 - `src/scripts/extensions/tts/index.js`
 - `src/scripts/extensions/tts/mimo.js`
 - `src/scripts/secrets.js`
 - `src/tauri/main/routes/index.js`
 - `src/tauri/main/routes/tts-routes.js`
+- `src-tauri/tauri.isolated.dev.json`
 - `tests/tts-routes-contract.test.mjs`
 
 No other files should be part of the final feature branch.
@@ -48,6 +50,19 @@ No other files should be part of the final feature branch.
 - `src/scripts/extensions/tts/index.js`
   - only minimal provider registration/import wiring should live here
   - no broad common-logic experiments should remain here
+
+### Startup safety
+
+- `src/scripts/openai.js`
+  - contains a required syntax-fix for startup
+  - without this fix the app can fail during boot with:
+    - `SyntaxError: Identifier 'quietPrompt' has already been declared`
+  - this is not a MiMo/Grok feature change, but it is required to avoid a gray screen / failed init in the user environment
+
+- `src-tauri/tauri.isolated.dev.json`
+  - isolated debug/dev config
+  - restores the exact `tauri dev --config ...` workflow the user was using
+  - uses a separate Tauri identifier to avoid colliding with the user's normal installed instance
 
 ### Secret wiring
 
@@ -103,16 +118,25 @@ No other files should be part of the final feature branch.
 
 ## Local Working Tree At Handoff
 
-There are currently uncommitted MiMo/Grok-only refinements on top of `5a82b1d`.
+At the time this file was updated for the startup issue, the working tree intentionally contains local, not-yet-pushed changes in:
 
-These are the only remaining local diffs:
-
-- `src/scripts/extensions/tts/grok.js`
-- `src/scripts/extensions/tts/mimo.js`
-- `src/tauri/main/routes/tts-routes.js`
-- `tests/tts-routes-contract.test.mjs`
+- `src/scripts/openai.js`
+- `src-tauri/tauri.isolated.dev.json`
 
 ### What those local diffs do
+
+- `openai.js`
+  - renames the local prompt variable from `quietPrompt` to `quietPromptEntry`
+  - prevents a duplicate identifier declaration inside `populateChatCompletion(...)`
+  - this is the specific fix for the boot-time syntax error / gray screen
+
+- `tauri.isolated.dev.json`
+  - reintroduces the isolated launch config
+  - makes this command valid again:
+    - `corepack pnpm exec tauri dev --config src-tauri/tauri.isolated.dev.json`
+  - gives the isolated instance:
+    - `productName = TauriTavern Isolated`
+    - `identifier = com.tauritavern.client.isolated`
 
 - `grok.js`
   - adds `una` to fallback voices
@@ -140,9 +164,6 @@ These were local debugging or broad behavior changes and were intentionally remo
   - bootstrap failure overlay
   - gray-screen diagnostics
 
-- `src/scripts/openai.js`
-  - unrelated `quietPrompt` rename
-
 - `src/scripts/extensions/tts/index.js`
   - all common TTS behavior experiments
   - auto-play queue wake-up experiments
@@ -150,10 +171,73 @@ These were local debugging or broad behavior changes and were intentionally remo
   - shared audio playback pipeline changes
   - debug logging
 
-- `src-tauri/tauri.isolated.dev.json`
-  - isolated local debug config
-
 Those removals were done because the user requested that only MiMo/Grok work remain, and because broad TTS/common-layer edits were affecting unrelated providers.
+
+Later, two of those removals were intentionally reversed because they directly blocked local startup:
+
+- `src/scripts/openai.js`
+- `src-tauri/tauri.isolated.dev.json`
+
+Those two should stay unless someone proves a cleaner alternative.
+
+## Startup / Gray Screen Notes
+
+This section is important. It is the main source of confusion during the handoff.
+
+### Problem 1: isolated launch command fails
+
+Symptom:
+
+- `corepack pnpm exec tauri dev --config src-tauri/tauri.isolated.dev.json`
+- error says file not found
+
+Cause:
+
+- the isolated config file had been removed during scope cleanup
+
+Fix:
+
+- restore `src-tauri/tauri.isolated.dev.json`
+
+Minimal file contents:
+
+```json
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TauriTavern Isolated",
+  "identifier": "com.tauritavern.client.isolated"
+}
+```
+
+### Problem 2: app starts but goes gray / fails during boot
+
+Observed root cause in this environment:
+
+- `src/scripts/openai.js`
+- function: `populateChatCompletion(...)`
+- parameter list already contains `quietPrompt`
+- later inside the same function a local `const quietPrompt = ...` is declared again
+
+Failure symptom:
+
+- startup can fail on import with:
+  - `SyntaxError: Identifier 'quietPrompt' has already been declared`
+
+Fix:
+
+- rename the local variable to `quietPromptEntry`
+
+Verification used:
+
+```powershell
+node --check src\scripts\openai.js
+```
+
+### Why this matters
+
+Without the config file, the user's documented launch command is broken.
+
+Without the `quietPrompt` rename, the app can still compile but fail at frontend boot and present as a gray screen or failed initialization.
 
 ## Important Constraint
 
@@ -177,6 +261,8 @@ The user specifically reported that broad common-layer changes caused regression
    - inspect whether generated responses differ from providers that already work
    - inspect mobile/WebView playback restrictions
 4. Keep any future fixes tightly scoped to MiMo/Grok unless a shared-root cause is proven.
+5. Do not remove `src-tauri/tauri.isolated.dev.json` again unless you also update the documented launch workflow.
+6. Do not revert the `quietPrompt` rename unless you also prove the duplicate-declaration startup fault is gone.
 
 ## Useful Commands
 
@@ -204,4 +290,14 @@ Run isolated local app if needed:
 corepack pnpm exec tauri dev --config src-tauri/tauri.isolated.dev.json
 ```
 
-Note: the isolated config itself was intentionally removed from the final scoped work and should not be pushed unless someone explicitly decides to keep a debug-only config.
+If `cargo` is missing from `PATH`, use:
+
+```powershell
+$env:PATH="$env:USERPROFILE\.cargo\bin;$env:PATH"; corepack pnpm exec tauri dev --config src-tauri/tauri.isolated.dev.json
+```
+
+Verify startup syntax fix:
+
+```powershell
+node --check src\scripts\openai.js
+```
