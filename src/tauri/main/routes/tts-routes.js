@@ -1,13 +1,13 @@
-import { textResponse } from '../http-utils.js';
+import { jsonResponse, textResponse } from '../http-utils.js';
 
 const SECRET_KEYS = Object.freeze({
     MIMO: 'api_key_mimo',
     XAI: 'api_key_xai',
 });
 
-const XAI_VOICES = new Set(['ara', 'eve', 'leo', 'rex', 'sal']);
 const MIMO_MODELS = new Set(['mimo-v2-tts', 'mimo-v2.5-tts']);
 const MIMO_FORMATS = new Set(['wav', 'mp3']);
+const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 function getSecretValue(secretResult) {
     return String(secretResult?.value || '').trim();
@@ -88,7 +88,72 @@ function getMimoContentType(format) {
     }
 }
 
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isAbortError(error) {
+    return error?.name === 'AbortError';
+}
+
+async function fetchWithRetry(input, init, {
+    retries = 2,
+    retryDelayMs = 350,
+    retryableStatusCodes = RETRYABLE_STATUS_CODES,
+} = {}) {
+    let lastError = null;
+    let response = null;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            response = await fetch(input, init);
+            if (!retryableStatusCodes.has(response.status) || attempt === retries) {
+                return response;
+            }
+        } catch (error) {
+            if (isAbortError(error) || attempt === retries) {
+                throw error;
+            }
+
+            lastError = error;
+        }
+
+        await delay(retryDelayMs * (attempt + 1));
+    }
+
+    if (response) {
+        return response;
+    }
+
+    throw lastError ?? new Error('Failed to fetch');
+}
+
 export function registerTtsRoutes(router, context) {
+    router.post('/api/tts/grok/voices', async () => {
+        try {
+            const apiKey = getSecretValue(await findSecret(context, SECRET_KEYS.XAI));
+            if (!apiKey) {
+                return errorTextResponse('xAI API key is required', 400);
+            }
+
+            const response = await fetchWithRetry('https://api.x.ai/v1/tts/voices', {
+                headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                },
+            });
+
+            if (!response.ok) {
+                return await buildUpstreamErrorResponse(response, 'Grok voice list request failed');
+            }
+
+            const payload = await response.json();
+            return jsonResponse(payload);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+            return errorTextResponse(`Grok voice list request failed: ${message}`, 502);
+        }
+    });
+
     router.post('/api/tts/grok/generate', async ({ body, init }) => {
         try {
             const apiKey = getSecretValue(await findSecret(context, SECRET_KEYS.XAI));
@@ -105,11 +170,11 @@ export function registerTtsRoutes(router, context) {
                 return errorTextResponse('No text provided', 400);
             }
 
-            if (!XAI_VOICES.has(voiceId)) {
-                return errorTextResponse(`Unsupported Grok voice: ${voiceId}`, 400);
+            if (!voiceId) {
+                return errorTextResponse('No Grok voice provided', 400);
             }
 
-            const response = await fetch('https://api.x.ai/v1/tts', {
+            const response = await fetchWithRetry('https://api.x.ai/v1/tts', {
                 method: 'POST',
                 signal: init?.signal,
                 headers: {
@@ -183,7 +248,7 @@ export function registerTtsRoutes(router, context) {
                 content: text,
             });
 
-            const response = await fetch('https://api.xiaomimimo.com/v1/chat/completions', {
+            const response = await fetchWithRetry('https://api.xiaomimimo.com/v1/chat/completions', {
                 method: 'POST',
                 signal: init?.signal,
                 headers: {

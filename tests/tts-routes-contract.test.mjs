@@ -74,6 +74,44 @@ test('grok tts route proxies audio generation with xAI request contract', async 
     });
 });
 
+test('grok voice list route proxies upstream voices', async (t) => {
+    const router = createRouteRegistry();
+    const context = {
+        safeInvoke: async () => ({ value: 'xai-secret' }),
+    };
+
+    const originalFetch = globalThis.fetch;
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+    globalThis.fetch = async (url) => {
+        assert.equal(url, 'https://api.x.ai/v1/tts/voices');
+        return Response.json({
+            voices: [
+                { voice_id: 'eve', name: 'Eve', language: 'multilingual' },
+                { voice_id: 'una', name: 'Una', language: 'multilingual' },
+            ],
+        });
+    };
+
+    registerTtsRoutes(router, context);
+
+    const response = await router.handle({
+        method: 'POST',
+        path: '/api/tts/grok/voices',
+        body: {},
+    });
+
+    assert.ok(response);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+        voices: [
+            { voice_id: 'eve', name: 'Eve', language: 'multilingual' },
+            { voice_id: 'una', name: 'Una', language: 'multilingual' },
+        ],
+    });
+});
+
 test('grok tts route surfaces upstream error text via statusText', async (t) => {
     const router = createRouteRegistry();
     const context = {
@@ -102,7 +140,7 @@ test('grok tts route surfaces upstream error text via statusText', async (t) => 
         path: '/api/tts/grok/generate',
         body: {
             text: 'Hello world',
-            voiceId: 'eve',
+            voiceId: 'una',
         },
     });
 

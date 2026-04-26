@@ -57,6 +57,13 @@ class MimoTtsProvider {
             <select id="mimo_tts_model" class="text_pole"></select>
         </div>
         <div>
+            <label for="mimo_tts_format">Output Format:</label>
+            <select id="mimo_tts_format" class="text_pole">
+                <option value="wav">WAV</option>
+                <option value="mp3">MP3</option>
+            </select>
+        </div>
+        <div>
             <label for="mimo_tts_instructions">Optional Style Prompt:</label>
             <textarea id="mimo_tts_instructions" class="textarea_compact autoSetHeight" placeholder="Example: Bright, excited tone with a slightly faster pace."></textarea>
         </div>`;
@@ -97,6 +104,11 @@ class MimoTtsProvider {
             await this.onSettingsChange();
         });
 
+        $('#mimo_tts_format').val(this.settings.format);
+        $('#mimo_tts_format').on('change', () => {
+            this.onSettingsChange();
+        });
+
         $('#mimo_tts_instructions').val(this.settings.instructions);
         $('#mimo_tts_instructions').on('input', () => {
             this.onSettingsChange();
@@ -113,6 +125,7 @@ class MimoTtsProvider {
     async onSettingsChange() {
         const previousModel = this.settings.model;
         this.settings.model = String($('#mimo_tts_model').find(':selected').val() || this.defaultSettings.model);
+        this.settings.format = String($('#mimo_tts_format').find(':selected').val() || this.defaultSettings.format);
         this.settings.instructions = String($('#mimo_tts_instructions').val() || '');
         saveTtsProviderSettings();
 
