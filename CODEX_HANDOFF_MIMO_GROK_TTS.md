@@ -17,6 +17,7 @@ Current branch:
 These are the intended branch-level changes compared to `upstream/main`, plus the minimal startup fixes re-added later:
 
 - `src/scripts/openai.js`
+- `src/scripts/extensions/tts/gpt-sovits-adapter.js`
 - `src/scripts/extensions/tts/grok.js`
 - `src/scripts/extensions/tts/index.js`
 - `src/scripts/extensions/tts/mimo.js`
@@ -63,6 +64,13 @@ No other files should be part of the final feature branch.
   - isolated debug/dev config
   - restores the exact `tauri dev --config ...` workflow the user was using
   - uses a separate Tauri identifier to avoid colliding with the user's normal installed instance
+
+### Non-MiMo/Grok runtime safety fix
+
+- `src/scripts/extensions/tts/gpt-sovits-adapter.js`
+  - fixes a provider-endpoint input selector bug
+  - without this fix, the GPT-SoVITS adapter UI can appear to accept a custom endpoint but still keep using the default endpoint internally
+  - this affected testing in the isolated instance and can affect normal usage too
 
 ### Secret wiring
 
@@ -180,6 +188,12 @@ Later, two of those removals were intentionally reversed because they directly b
 
 Those two should stay unless someone proves a cleaner alternative.
 
+One more fix was added later because it directly affected network TTS testing:
+
+- `src/scripts/extensions/tts/gpt-sovits-adapter.js`
+
+That fix should also stay.
+
 ## Startup / Gray Screen Notes
 
 This section is important. It is the main source of confusion during the handoff.
@@ -239,6 +253,159 @@ Without the config file, the user's documented launch command is broken.
 
 Without the `quietPrompt` rename, the app can still compile but fail at frontend boot and present as a gray screen or failed initialization.
 
+## Isolation Details
+
+The isolated instance does not change application logic. It changes identity and storage location.
+
+### What isolation changes
+
+- Tauri app identifier
+  - normal app: `com.tauritavern.client`
+  - isolated app: `com.tauritavern.client.isolated`
+
+- persistent app-data directory
+  - normal app data and settings are separate from isolated app data and settings
+
+- WebView profile
+  - because the app identifier changes, the isolated instance gets its own separate WebView state instead of sharing the normal installed app's state
+
+### What isolation does not change
+
+- frontend code paths
+- backend route code paths
+- outbound HTTP request logic
+- MiMo route logic
+- Grok route logic
+- GPT-SoVITS adapter fetch logic
+
+If a provider works in the normal app but not in isolated mode, first suspect:
+
+- different settings
+- different saved secrets
+- different voice map
+- different provider endpoint value
+
+Do not first assume isolation changed the provider code path.
+
+### Important isolated data locations
+
+In this environment, isolated instance data lives under:
+
+- `C:\Users\Admin\AppData\Roaming\com.tauritavern.client.isolated\data\default-user\settings.json`
+- `C:\Users\Admin\AppData\Roaming\com.tauritavern.client.isolated\data\default-user\secrets.json`
+- `C:\Users\Admin\AppData\Roaming\com.tauritavern.client.isolated\data\default-user\tauritavern-settings.json`
+- `C:\Users\Admin\AppData\Roaming\com.tauritavern.client.isolated\logs`
+
+This means:
+
+- changing provider settings in the normal app does not update the isolated app
+- adding API keys in the normal app does not add them to the isolated app
+- changing TTS voice maps in the normal app does not update the isolated app
+
+### Recommended isolated launch commands
+
+Primary:
+
+```powershell
+corepack pnpm exec tauri dev --config src-tauri/tauri.isolated.dev.json
+```
+
+If `cargo` is missing from `PATH`:
+
+```powershell
+$env:PATH="$env:USERPROFILE\.cargo\bin;$env:PATH"; corepack pnpm exec tauri dev --config src-tauri/tauri.isolated.dev.json
+```
+
+## GPT-SoVITS Adapter Notes
+
+This section is important because the user specifically hit a custom endpoint failure.
+
+### Key distinction from MiMo and Grok
+
+MiMo and Grok use Tauri backend proxy routes:
+
+- MiMo: `/api/tts/mimo/generate`
+- Grok voices: `/api/tts/grok/voices`
+- Grok generate: `/api/tts/grok/generate`
+
+GPT-SoVITS-Adapter does not use a Tauri backend proxy. It does direct frontend fetches to the configured endpoint.
+
+Relevant requests:
+
+- `GET {provider_endpoint}/speakers`
+- `POST {provider_endpoint}/`
+
+Relevant file:
+
+- `src/scripts/extensions/tts/gpt-sovits-adapter.js`
+
+### Conclusion: is `192.168.31.206:9881` failure caused by isolation?
+
+Usually, no.
+
+Isolation does not rewrite the GPT-SoVITS endpoint or route its traffic differently. The provider fetches directly from the frontend.
+
+What isolation can change is only the saved value of `provider_endpoint`, because isolated settings are stored separately.
+
+### Actual bug found in this repo
+
+There was a selector mismatch in `gpt-sovits-adapter.js`:
+
+- settings HTML input id:
+  - `gpt_sovits_adapter_tts_endpoint`
+- `loadSettings()` was incorrectly binding to:
+  - `#tts_endpoint`
+
+Impact:
+
+- the endpoint field could display one value while the actual bound setting logic did not initialize or save correctly
+- custom endpoints like `http://192.168.31.206:9881` could appear to be entered, but the provider could continue behaving as if the default endpoint was still in effect
+
+Fix:
+
+- bind `loadSettings()` to `#gpt_sovits_adapter_tts_endpoint`
+
+### Other likely failure causes for GPT-SoVITS custom endpoint
+
+If it still fails after the selector fix, check these in order:
+
+1. The isolated instance may still have old provider settings in its own `settings.json`.
+2. The GPT-SoVITS adapter service may only be bound to `127.0.0.1` on the server machine instead of `0.0.0.0`.
+3. Windows firewall on the machine at `192.168.31.206` may block port `9881`.
+4. The adapter may not expose exactly:
+   - `GET /speakers`
+   - `POST /`
+5. The service may be reachable from browser on the host machine but not reachable from the Tauri desktop machine over LAN.
+6. CORS may be blocked if the adapter does not allow the Tauri dev origin.
+
+### Fast manual checks for GPT-SoVITS endpoint
+
+From the same machine running TauriTavern:
+
+```powershell
+Invoke-WebRequest http://192.168.31.206:9881/speakers
+```
+
+If that fails, the problem is below the app layer.
+
+If it succeeds, next verify that the adapter accepts the expected POST shape from `gpt-sovits-adapter.js`.
+
+### Why this matters for future debugging
+
+If GPT-SoVITS fails in isolated mode, do not immediately blame:
+
+- MiMo changes
+- Grok changes
+- Tauri route changes
+
+First separate these categories:
+
+- startup problem
+- isolated settings problem
+- provider endpoint save/load problem
+- LAN reachability problem
+- adapter API contract problem
+
 ## Important Constraint
 
 If automatic playback is still broken for MiMo/Grok, do not immediately touch the shared logic in `src/scripts/extensions/tts/index.js` again.
@@ -263,6 +430,7 @@ The user specifically reported that broad common-layer changes caused regression
 4. Keep any future fixes tightly scoped to MiMo/Grok unless a shared-root cause is proven.
 5. Do not remove `src-tauri/tauri.isolated.dev.json` again unless you also update the documented launch workflow.
 6. Do not revert the `quietPrompt` rename unless you also prove the duplicate-declaration startup fault is gone.
+7. If GPT-SoVITS custom endpoints stop working, inspect `gpt-sovits-adapter.js` before touching isolation, MiMo, or Grok code.
 
 ## Useful Commands
 
